@@ -518,7 +518,55 @@ namespace NLastGetoptFork {
             L;
             L << "local need_space=\"1\"";
             L << "local IFS=$' \\t\\n'";
-            L;    
+            L;
+            L << "__ydb_has_option() {";
+            {
+                I;
+                L << "local opt=\"$1\"";
+                L << "local w";
+                L << "for w in \"${words[@]}\"; do";
+                {
+                    I;
+                    L << "if [[ \"$w\" == \"$opt\" ]]; then";
+                    {
+                        I;
+                        L << "return 0";
+                    }
+                    L << "fi";
+                }
+                L << "done";
+                L << "return 1";
+            }
+            L << "}";
+            L;
+            L << "__ydb_any_other_option_set() {";
+            {
+                I;
+                L << "local opt=\"$1\"";
+                L << "local w";
+                L << "for w in \"${words[@]}\"; do";
+                {
+                    I;
+                    L << "if [[ \"$w\" == -* && \"$w\" != \"$opt\" ]]; then";
+                    {
+                        I;
+                        L << "return 0";
+                    }
+                    L << "fi";
+                }
+                L << "done";
+                L << "return 1";
+            }
+            L << "}";
+            L;
+            L << "__ydb_join_alts() {";
+            {
+                I;
+                L << "local IFS='|'";
+                L << "printf '@(%s)' \"$*\"";
+            }
+            L << "}";
+            L;
             L << "while true; do";
             {
                 I;
@@ -572,23 +620,98 @@ namespace NLastGetoptFork {
             L << "if [[ ${cur} == -* ]] ;  then";
             {
                 I;
-                auto& line = L << "COMPREPLY+=( $(compgen -W '";
-                TStringBuf sep = "";
+                if (opts.ArgPermutation_ == EArgPermutation::REQUIRE_ORDER) {
+                    L << "args=0";
+                    L << "opts=$(__ydb_join_alts \\";
+                    {
+                        I;
+                        for (auto& opt : unorderedOpts) {
+                            if (opt->HasArg_ == EHasArg::NO_ARGUMENT || opt->IsHidden()) {
+                                continue;
+                            }
+                            for (auto& shortName : opt->GetShortNames()) {
+                                TStringBuilder flag;
+                                flag << "-" << TStringBuf(&shortName, 1);
+                                L << BB(flag) << " \\";
+                            }
+                            for (auto& longName: opt->GetLongNames()) {
+                                TStringBuilder flag;
+                                flag << "--" << longName;
+                                L << BB(flag) << " \\";
+                            }
+                        }
+                    }
+                    L << ")";
+                    L << "for (( i=" << level << "; i < cword; i++ )); do";
+                    {
+                        I;
+                        L << "if [[ ${words[i]} != -* && ${words[i-1]} != $opts ]]; then";
+                        {
+                            I;
+                            L << "(( args++ ))";
+                        }
+                        L << "fi";
+                    }
+                    L << "done";
+                    L << "if [[ $args -eq 0 ]]; then";
+                }
+                L << "candidates=()";
                 for (auto& opt : unorderedOpts) {
                     if (opt->IsHidden()) {
                         continue;
                     }
 
                     for (auto& shortName : opt->GetShortNames()) {
-                        line << sep << "-" << B(TStringBuf(&shortName, 1));
-                        sep = " ";
+                        auto flag = TStringBuilder() << "-" << TStringBuf(&shortName, 1);
+                        TStringBuilder condition;
+                        if (!opt->AllowMultipleCompletion_) {
+                            condition << "! __ydb_has_option " << BB(flag);
+                        }
+                        if (opt->DisableCompletionForOptions_) {
+                            if (!condition.empty()) {
+                                condition << " && ";
+                            }
+                            condition << "! __ydb_any_other_option_set " << BB(flag);
+                        }
+                        if (condition.empty()) {
+                            L << "candidates+=(" << BB(flag) << ")";
+                        } else {
+                            L << "if " << condition << "; then";
+                            {
+                                I;
+                                L << "candidates+=(" << BB(flag) << ")";
+                            }
+                            L << "fi";
+                        }
                     }
                     for (auto& longName: opt->GetLongNames()) {
-                        line << sep << "--" << B(longName);
-                        sep = " ";
+                        auto flag = TStringBuilder() << "--" << longName;
+                        TStringBuilder condition;
+                        if (!opt->AllowMultipleCompletion_) {
+                            condition << "! __ydb_has_option " << BB(flag);
+                        }
+                        if (opt->DisableCompletionForOptions_) {
+                            if (!condition.empty()) {
+                                condition << " && ";
+                            }
+                            condition << "! __ydb_any_other_option_set " << BB(flag);
+                        }
+                        if (condition.empty()) {
+                            L << "candidates+=(" << BB(flag) << ")";
+                        } else {
+                            L << "if " << condition << "; then";
+                            {
+                                I;
+                                L << "candidates+=(" << BB(flag) << ")";
+                            }
+                            L << "fi";
+                        }
                     }
                 }
-                line << "' -- ${cur}) )";
+                L << "COMPREPLY+=( $(compgen -W \"${candidates[*]}\" -- ${cur}) )";
+                if (opts.ArgPermutation_ == EArgPermutation::REQUIRE_ORDER) {
+                    L << "fi";
+                }
             }
             L << "else";
             {
@@ -648,59 +771,101 @@ namespace NLastGetoptFork {
                                 L << "words=(\"${words[@]:0:" << level << "}\" \"${words[@]:" << level + 1 << "}\")";
                                 L << "continue";
                             } else if (opt->HasArg_ == EHasArg::REQUIRED_ARGUMENT) {
-                                // pop option and its argument from words
-                                L << "cword=$((cword-2))";
-                                L << "words=(\"${words[@]:0:" << level << "}\" \"${words[@]:" << level + 2 << "}\")";
-                                L << "continue";                                
-                            } else if (opt->HasArg_ == EHasArg::OPTIONAL_ARGUMENT) {
-                                // check if option has argument set -- so that we know how many words to skip
-                                L << "args=0";
-                                auto& line = L << "opts='@(";
-                                TStringBuf sep = "";
-                                for (auto& opt : unorderedOpts) {
-                                    if (opt->IsHidden()) {
-                                        continue;
+                                TStringBuilder attachedCondition;
+                                for (auto& shortName : opt->GetShortNames()) {
+                                    if (!attachedCondition.empty()) {
+                                        attachedCondition << " || ";
                                     }
-                                    for (auto& shortName : opt->GetShortNames()) {
-                                        line << sep << "-" << B(TStringBuf(&shortName, 1));
-                                        sep = "|";
-                                    }
-                                    for (auto& longName: opt->GetLongNames()) {
-                                        line << sep << "--" << B(longName);
-                                        sep = "|";
-                                    }
+                                    attachedCondition << "[[ ${words[" << level << "]} == -" << B(TStringBuf(&shortName, 1))
+                                                     << "* && ${words[" << level << "]} != -" << B(TStringBuf(&shortName, 1)) << " ]]";
                                 }
-                                for (auto &mode : modes) {
-                                    if (mode->Name.empty() || mode->Hidden || mode->NoCompletion) {
-                                        continue;
+                                for (auto& longName: opt->GetLongNames()) {
+                                    if (!attachedCondition.empty()) {
+                                        attachedCondition << " || ";
                                     }
-
-                                    line << sep << BB(mode->Name);
-                                    sep = "|";
-                                    for (auto& alias : mode->Aliases) {
-                                        line << sep << BB(alias);
-                                    }
+                                    attachedCondition << "[[ ${words[" << level << "]} == --" << B(longName) << "=* ]]";
                                 }
-                                line << ")'";
-                                L << "for (( i=" << level + 1 << "; i < cword; i++ )); do";
-                                {
-                                    I;
-                                    L << "if [[ ${words[i]} == $opts ]]; then";
+                                if (!attachedCondition.empty()) {
+                                    L << "if " << attachedCondition << "; then";
                                     {
                                         I;
-                                        L << "break";                                        
+                                        // pop option with attached argument from words
+                                        L << "cword=$((cword-1))";
+                                        L << "words=(\"${words[@]:0:" << level << "}\" \"${words[@]:" << level + 1 << "}\")";
+                                        L << "continue";
                                     }
                                     L << "else";
                                     {
                                         I;
-                                        L << "(( args++ ))";
+                                        // pop option and its argument from words
+                                        L << "cword=$((cword-2))";
+                                        L << "words=(\"${words[@]:0:" << level << "}\" \"${words[@]:" << level + 2 << "}\")";
+                                        L << "continue";
+                                    }
+                                    L << "fi";
+                                } else {
+                                    // pop option and its argument from words
+                                    L << "cword=$((cword-2))";
+                                    L << "words=(\"${words[@]:0:" << level << "}\" \"${words[@]:" << level + 2 << "}\")";
+                                    L << "continue";
+                                }
+                            } else if (opt->HasArg_ == EHasArg::OPTIONAL_ARGUMENT) {
+                                // optional argument is consumed only if it is attached or the immediate next word
+                                TStringBuilder attachedCondition;
+                                for (auto& shortName : opt->GetShortNames()) {
+                                    if (!attachedCondition.empty()) {
+                                        attachedCondition << " || ";
+                                    }
+                                    attachedCondition << "[[ ${words[" << level << "]} == -" << B(TStringBuf(&shortName, 1))
+                                                     << "* && ${words[" << level << "]} != -" << B(TStringBuf(&shortName, 1)) << " ]]";
+                                }
+                                for (auto& longName: opt->GetLongNames()) {
+                                    if (!attachedCondition.empty()) {
+                                        attachedCondition << " || ";
+                                    }
+                                    attachedCondition << "[[ ${words[" << level << "]} == --" << B(longName) << "=* ]]";
+                                }
+                                if (!attachedCondition.empty()) {
+                                    L << "if " << attachedCondition << "; then";
+                                    {
+                                        I;
+                                        // pop option with attached argument from words
+                                        L << "cword=$((cword-1))";
+                                        L << "words=(\"${words[@]:0:" << level << "}\" \"${words[@]:" << level + 1 << "}\")";
+                                        L << "continue";
                                     }
                                     L << "fi";
                                 }
-                                L << "done";
-                                L;
-
-                                L << "if [[ $args == 0 ]] ; then ";
+                                L << "opts=$(__ydb_join_alts \\";
+                                {
+                                    I;
+                                    for (auto& opt : unorderedOpts) {
+                                        if (opt->IsHidden()) {
+                                            continue;
+                                        }
+                                        for (auto& shortName : opt->GetShortNames()) {
+                                            TStringBuilder flag;
+                                            flag << "-" << TStringBuf(&shortName, 1);
+                                            L << BB(flag) << " \\";
+                                        }
+                                        for (auto& longName: opt->GetLongNames()) {
+                                            TStringBuilder flag;
+                                            flag << "--" << longName;
+                                            L << BB(flag) << " \\";
+                                        }
+                                    }
+                                    for (auto &mode : modes) {
+                                        if (mode->Name.empty() || mode->Hidden || mode->NoCompletion) {
+                                            continue;
+                                        }
+                                        L << BB(mode->Name) << " \\";
+                                        for (auto& alias : mode->Aliases) {
+                                            L << BB(alias) << " \\";
+                                        }
+                                    }
+                                }
+                                L << ")";
+                                L << "if [[ ${words[" << level + 1 << "]} == -* || ${words[" << level + 1 << "]} == $opts ]]; then";
                                 {
                                     I;
                                     // pop option from words
@@ -758,22 +923,26 @@ namespace NLastGetoptFork {
                     I;
 
                     L << "args=0";
-                    auto& line = L << "opts='@(";
-                    TStringBuf sep = "";
-                    for (auto& opt : unorderedOpts) {
-                        if (opt->HasArg_ == EHasArg::NO_ARGUMENT || opt->IsHidden()) {
-                            continue;
-                        }
-                        for (auto& shortName : opt->GetShortNames()) {
-                            line << sep << "-" << B(TStringBuf(&shortName, 1));
-                            sep = "|";
-                        }
-                        for (auto& longName: opt->GetLongNames()) {
-                            line << sep << "--" << B(longName);
-                            sep = "|";
+                    L << "opts=$(__ydb_join_alts \\";
+                    {
+                        I;
+                        for (auto& opt : unorderedOpts) {
+                            if (opt->HasArg_ == EHasArg::NO_ARGUMENT || opt->IsHidden()) {
+                                continue;
+                            }
+                            for (auto& shortName : opt->GetShortNames()) {
+                                TStringBuilder flag;
+                                flag << "-" << TStringBuf(&shortName, 1);
+                                L << BB(flag) << " \\";
+                            }
+                            for (auto& longName: opt->GetLongNames()) {
+                                TStringBuilder flag;
+                                flag << "--" << longName;
+                                L << BB(flag) << " \\";
+                            }
                         }
                     }
-                    line << ")'";
+                    L << ")";
                     L << "for (( i=" << level << "; i < cword; i++ )); do";
                     {
                         I;
@@ -804,7 +973,48 @@ namespace NLastGetoptFork {
                             {
                                 I;
                                 auto& spec = argSpecs[i];
-                                if (spec.Completer_ != nullptr) {
+                                TStringBuilder condition;
+                                for (auto& opt : unorderedOpts) {
+                                    bool disable = opt->DisableCompletionForFreeArgs_;
+                                    if (!disable) {
+                                        for (auto disabledIndex : opt->DisableCompletionForFreeArg_) {
+                                            if (disabledIndex == i) {
+                                                disable = true;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    if (!disable) {
+                                        continue;
+                                    }
+                                    for (auto& shortName : opt->GetShortNames()) {
+                                        if (!condition.empty()) {
+                                            condition << " || ";
+                                        }
+                                        condition << "__ydb_has_option " << BB(TStringBuilder() << "-" << TStringBuf(&shortName, 1));
+                                    }
+                                    for (auto& longName : opt->GetLongNames()) {
+                                        if (!condition.empty()) {
+                                            condition << " || ";
+                                        }
+                                        condition << "__ydb_has_option " << BB(TStringBuilder() << "--" << longName);
+                                    }
+                                }
+                                if (!condition.empty()) {
+                                    L << "if " << condition << "; then";
+                                    {
+                                        I;
+                                        L << ": # completion disabled for this free arg";
+                                    }
+                                    L << "else";
+                                    {
+                                        I;
+                                        if (spec.Completer_ != nullptr) {
+                                            spec.Completer_->GenerateBash(out);
+                                        }
+                                    }
+                                    L << "fi";
+                                } else if (spec.Completer_ != nullptr) {
                                     spec.Completer_->GenerateBash(out);
                                 }
                                 L << ";;";
@@ -815,7 +1025,39 @@ namespace NLastGetoptFork {
                             {
                                 I;
                                 auto& spec = opts.GetTrailingArgSpec();
-                                if (spec.Completer_ != nullptr) {
+                                TStringBuilder condition;
+                                for (auto& opt : unorderedOpts) {
+                                    if (!opt->DisableCompletionForFreeArgs_) {
+                                        continue;
+                                    }
+                                    for (auto& shortName : opt->GetShortNames()) {
+                                        if (!condition.empty()) {
+                                            condition << " || ";
+                                        }
+                                        condition << "__ydb_has_option " << BB(TStringBuilder() << "-" << TStringBuf(&shortName, 1));
+                                    }
+                                    for (auto& longName : opt->GetLongNames()) {
+                                        if (!condition.empty()) {
+                                            condition << " || ";
+                                        }
+                                        condition << "__ydb_has_option " << BB(TStringBuilder() << "--" << longName);
+                                    }
+                                }
+                                if (!condition.empty()) {
+                                    L << "if " << condition << "; then";
+                                    {
+                                        I;
+                                        L << ": # completion disabled for this free arg";
+                                    }
+                                    L << "else";
+                                    {
+                                        I;
+                                        if (spec.Completer_ != nullptr) {
+                                            spec.Completer_->GenerateBash(out);
+                                        }
+                                    }
+                                    L << "fi";
+                                } else if (spec.Completer_ != nullptr) {
                                     spec.Completer_->GenerateBash(out);
                                 }
                                 L << ";;";
@@ -908,27 +1150,140 @@ namespace NLastGetoptFork {
         L << "if [[ ${cur} == -* ]] ;  then";
         {
             I;
-            auto& line = L << "COMPREPLY+=( $(compgen -W '";
-            TStringBuf sep = "";
+            if (opts.ArgPermutation_ == EArgPermutation::REQUIRE_ORDER) {
+                L << "args=0";
+                L << "opts=$(__ydb_join_alts \\";
+                {
+                    I;
+                    for (auto& opt : unorderedOpts) {
+                        if (opt->HasArg_ == EHasArg::NO_ARGUMENT || opt->IsHidden()) {
+                            continue;
+                        }
+                        for (auto& shortName : opt->GetShortNames()) {
+                            TStringBuilder flag;
+                            flag << "-" << TStringBuf(&shortName, 1);
+                            L << BB(flag) << " \\";
+                        }
+                        for (auto& longName: opt->GetLongNames()) {
+                            TStringBuilder flag;
+                            flag << "--" << longName;
+                            L << BB(flag) << " \\";
+                        }
+                    }
+                }
+                L << ")";
+                L << "for (( i=" << level << "; i < cword; i++ )); do";
+                {
+                    I;
+                    L << "if [[ ${words[i]} != -* && ${words[i-1]} != $opts ]]; then";
+                    {
+                        I;
+                        L << "(( args++ ))";
+                    }
+                    L << "fi";
+                }
+                L << "done";
+                L << "if [[ $args -eq 0 ]]; then";
+            }
+            L << "candidates=()";
             for (auto& opt : unorderedOpts) {
                 if (opt->IsHidden()) {
                     continue;
                 }
 
                 for (auto& shortName : opt->GetShortNames()) {
-                    line << sep << "-" << B(TStringBuf(&shortName, 1));
-                    sep = " ";
+                    auto flag = TStringBuilder() << "-" << TStringBuf(&shortName, 1);
+                    TStringBuilder condition;
+                    if (!opt->AllowMultipleCompletion_) {
+                        condition << "! __ydb_has_option " << BB(flag);
+                    }
+                    if (opt->DisableCompletionForOptions_) {
+                        if (!condition.empty()) {
+                            condition << " && ";
+                        }
+                        condition << "! __ydb_any_other_option_set " << BB(flag);
+                    }
+                    if (condition.empty()) {
+                        L << "candidates+=(" << BB(flag) << ")";
+                    } else {
+                        L << "if " << condition << "; then";
+                        {
+                            I;
+                            L << "candidates+=(" << BB(flag) << ")";
+                        }
+                        L << "fi";
+                    }
                 }
                 for (auto& longName: opt->GetLongNames()) {
-                    line << sep << "--" << B(longName);
-                    sep = " ";
+                    auto flag = TStringBuilder() << "--" << longName;
+                    TStringBuilder condition;
+                    if (!opt->AllowMultipleCompletion_) {
+                        condition << "! __ydb_has_option " << BB(flag);
+                    }
+                    if (opt->DisableCompletionForOptions_) {
+                        if (!condition.empty()) {
+                            condition << " && ";
+                        }
+                        condition << "! __ydb_any_other_option_set " << BB(flag);
+                    }
+                    if (condition.empty()) {
+                        L << "candidates+=(" << BB(flag) << ")";
+                    } else {
+                        L << "if " << condition << "; then";
+                        {
+                            I;
+                            L << "candidates+=(" << BB(flag) << ")";
+                        }
+                        L << "fi";
+                    }
                 }
             }
-            line << "' -- ${cur}) )";
+            L << "COMPREPLY+=( $(compgen -W \"${candidates[*]}\" -- ${cur}) )";
+            if (opts.ArgPermutation_ == EArgPermutation::REQUIRE_ORDER) {
+                L << "fi";
+            }
         }
         L << "else";
         {
             I;
+            bool hasArgOption = false;
+            for (auto& opt : unorderedOpts) {
+                if (opt->HasArg_ != EHasArg::NO_ARGUMENT && !opt->IsHidden()) {
+                    hasArgOption = true;
+                    break;
+                }
+            }
+            if (hasArgOption) {
+                L << "if false; then";
+                for (auto& opt : unorderedOpts) {
+                    if (opt->HasArg_ == EHasArg::NO_ARGUMENT || opt->IsHidden()) {
+                        continue;
+                    }
+                    for (auto& shortName : opt->GetShortNames()) {
+                        L << "elif [[ ${cur} == -" << B(TStringBuf(&shortName, 1)) << "* && ${cur} != -" << B(TStringBuf(&shortName, 1)) << " ]]; then";
+                        {
+                            I;
+                            if (opt->Completer_ != nullptr) {
+                                opt->Completer_->GenerateBash(out);
+                            } else {
+                                L << ": # no-op: no completer for option";
+                            }
+                        }
+                    }
+                    for (auto& longName : opt->GetLongNames()) {
+                        L << "elif [[ ${cur} == --" << B(longName) << "=* ]]; then";
+                        {
+                            I;
+                            if (opt->Completer_ != nullptr) {
+                                opt->Completer_->GenerateBash(out);
+                            } else {
+                                L << ": # no-op: no completer for option";
+                            }
+                        }
+                    }
+                }
+                L << "else";
+            }
             L << "case ${prev} in";
             {
                 I;
@@ -962,22 +1317,26 @@ namespace NLastGetoptFork {
                     I;
 
                     L << "args=0";
-                    auto& line = L << "opts='@(";
-                    TStringBuf sep = "";
-                    for (auto& opt : unorderedOpts) {
-                        if (opt->HasArg_ == EHasArg::NO_ARGUMENT || opt->IsHidden()) {
-                            continue;
-                        }
-                        for (auto& shortName : opt->GetShortNames()) {
-                            line << sep << "-" << B(TStringBuf(&shortName, 1));
-                            sep = "|";
-                        }
-                        for (auto& longName: opt->GetLongNames()) {
-                            line << sep << "--" << B(longName);
-                            sep = "|";
+                    L << "opts=$(__ydb_join_alts \\";
+                    {
+                        I;
+                        for (auto& opt : unorderedOpts) {
+                            if (opt->HasArg_ == EHasArg::NO_ARGUMENT || opt->IsHidden()) {
+                                continue;
+                            }
+                            for (auto& shortName : opt->GetShortNames()) {
+                                TStringBuilder flag;
+                                flag << "-" << TStringBuf(&shortName, 1);
+                                L << BB(flag) << " \\";
+                            }
+                            for (auto& longName: opt->GetLongNames()) {
+                                TStringBuilder flag;
+                                flag << "--" << longName;
+                                L << BB(flag) << " \\";
+                            }
                         }
                     }
-                    line << ")'";
+                    L << ")";
                     L << "for (( i=" << level << "; i < cword; i++ )); do";
                     {
                         I;
@@ -1008,7 +1367,48 @@ namespace NLastGetoptFork {
                             {
                                 I;
                                 auto& spec = argSpecs[i];
-                                if (spec.Completer_ != nullptr) {
+                                TStringBuilder condition;
+                                for (auto& opt : unorderedOpts) {
+                                    bool disable = opt->DisableCompletionForFreeArgs_;
+                                    if (!disable) {
+                                        for (auto disabledIndex : opt->DisableCompletionForFreeArg_) {
+                                            if (disabledIndex == i) {
+                                                disable = true;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    if (!disable) {
+                                        continue;
+                                    }
+                                    for (auto& shortName : opt->GetShortNames()) {
+                                        if (!condition.empty()) {
+                                            condition << " || ";
+                                        }
+                                        condition << "__ydb_has_option " << BB(TStringBuilder() << "-" << TStringBuf(&shortName, 1));
+                                    }
+                                    for (auto& longName : opt->GetLongNames()) {
+                                        if (!condition.empty()) {
+                                            condition << " || ";
+                                        }
+                                        condition << "__ydb_has_option " << BB(TStringBuilder() << "--" << longName);
+                                    }
+                                }
+                                if (!condition.empty()) {
+                                    L << "if " << condition << "; then";
+                                    {
+                                        I;
+                                        L << ": # completion disabled for this free arg";
+                                    }
+                                    L << "else";
+                                    {
+                                        I;
+                                        if (spec.Completer_ != nullptr) {
+                                            spec.Completer_->GenerateBash(out);
+                                        }
+                                    }
+                                    L << "fi";
+                                } else if (spec.Completer_ != nullptr) {
                                     spec.Completer_->GenerateBash(out);
                                 }
                                 L << ";;";
@@ -1019,7 +1419,39 @@ namespace NLastGetoptFork {
                             {
                                 I;
                                 auto& spec = opts.GetTrailingArgSpec();
-                                if (spec.Completer_ != nullptr) {
+                                TStringBuilder condition;
+                                for (auto& opt : unorderedOpts) {
+                                    if (!opt->DisableCompletionForFreeArgs_) {
+                                        continue;
+                                    }
+                                    for (auto& shortName : opt->GetShortNames()) {
+                                        if (!condition.empty()) {
+                                            condition << " || ";
+                                        }
+                                        condition << "__ydb_has_option " << BB(TStringBuilder() << "-" << TStringBuf(&shortName, 1));
+                                    }
+                                    for (auto& longName : opt->GetLongNames()) {
+                                        if (!condition.empty()) {
+                                            condition << " || ";
+                                        }
+                                        condition << "__ydb_has_option " << BB(TStringBuilder() << "--" << longName);
+                                    }
+                                }
+                                if (!condition.empty()) {
+                                    L << "if " << condition << "; then";
+                                    {
+                                        I;
+                                        L << ": # completion disabled for this free arg";
+                                    }
+                                    L << "else";
+                                    {
+                                        I;
+                                        if (spec.Completer_ != nullptr) {
+                                            spec.Completer_->GenerateBash(out);
+                                        }
+                                    }
+                                    L << "fi";
+                                } else if (spec.Completer_ != nullptr) {
                                     spec.Completer_->GenerateBash(out);
                                 }
                                 L << ";;";
@@ -1031,6 +1463,9 @@ namespace NLastGetoptFork {
                 }
             }
             L << "esac";
+            if (hasArgOption) {
+                L << "fi";
+            }
         }
         L << "fi";
     }
