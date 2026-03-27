@@ -102,10 +102,6 @@ public:
             TArgSetting Max;
         };
 
-        static ELogPriority VerbosityLevelToELogPrioritySilent(ui32 lvl);
-        static ELogPriority VerbosityLevelToELogPriority(ui32 lvl);
-        static ELogPriority VerbosityLevelToELogPriorityChatty(ui32 lvl);
-
         int ArgC;
         char** ArgV;
         int InitialArgC;
@@ -469,6 +465,9 @@ private:
     void CheckForExecutableOptions(TConfig& config);
 
     constexpr static int DESCRIPTION_ALIGNMENT = 28;
+
+    friend class TYdbCommandAutoCompletionWrapper;
+    friend class TYdbCommandTreeAutoCompletionWrapper;
 };
 
 class TClientCommandTree : public TClientCommand {
@@ -507,6 +506,8 @@ protected:
 
     TMap<TString, std::unique_ptr<TClientCommand>> SubCommands;
     TMap<TString, TString> Aliases;
+
+    friend class TYdbCommandTreeAutoCompletionWrapper;
 };
 
 class TCommandWithPath {

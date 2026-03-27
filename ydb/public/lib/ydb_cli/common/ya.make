@@ -8,8 +8,14 @@ SRCS(
     command.cpp
     command_utils.cpp
     common.cpp
+    completion_generator.cpp
+    completion.cpp
+    config.cpp
+    log.cpp
     csv_parser.cpp
     describe.cpp
+    download_manager.cpp
+    duration.cpp
     examples.cpp
     format.cpp
     ftxui.cpp
@@ -44,11 +50,15 @@ PEERDIR(
     contrib/libs/aws-sdk-cpp/aws-cpp-sdk-s3
     contrib/libs/ftxui
     contrib/libs/openssl
+    contrib/libs/yaml-cpp
     contrib/restricted/patched/replxx
     library/cpp/getopt
+    library/cpp/http/simple
     library/cpp/json/writer
+    library/cpp/logger
     library/cpp/regex/pcre
     library/cpp/string_utils/csv
+    library/cpp/string_utils/url
     library/cpp/yaml/as
     ydb/public/lib/json_value
     ydb/public/sdk/cpp/src/library/operation_id
